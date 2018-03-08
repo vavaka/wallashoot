@@ -95,7 +95,7 @@ stats(GameRef) ->
 %% ---------------------------------------------------------------
 
 init(Options = {Name, Width, Height, MaxPlayers}) ->
-  random:seed(erlang:timestamp()),
+  random:seed(erlang:now()),
   State = #state{
     name = Name,
     max_players = MaxPlayers,
@@ -352,13 +352,19 @@ is_game_over(State) ->
   players_count(State) =< 1.
 
 random_free_position(State = #state{map = Map}) ->
-  Position = map:random_position(Map),
+  Position = random_map_position(Map),
   case map:get(Position, Map) of
     free ->
       Position;
     _ ->
       random_free_position(State)
   end.
+
+random_map_position(Map) ->
+  Width = map:width(Map),
+  Height = map:height(Map),
+  {random:uniform(Width) - 1, random:uniform(Height) - 1}.
+
 
 
 new_players() ->

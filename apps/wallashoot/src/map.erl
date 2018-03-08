@@ -11,12 +11,13 @@
 %% API
 -export([
   new/2,
+  width/1,
+  height/1,
   get/2,
   set/3,
   validate_position/2,
   validate_direction/1,
   next_position/2,
-  random_position/1,
   dump/3
 ]).
 
@@ -39,6 +40,12 @@ new(Width, Height) ->
     height = Height,
     surface = array:new(Height, [{default, array:new(Width, [{default, free}])}])
   }.
+
+-spec width(Map :: game_map()) -> non_neg_integer().
+width(#map{width = Width}) -> Width.
+
+-spec height(Map :: game_map()) -> non_neg_integer().
+height(#map{height = Height}) -> Height.
 
 -spec get(Position :: position(), Map :: game_map()) -> any().
 get(Position = {X, Y}, Map = #map{surface = Surface}) ->
@@ -98,10 +105,6 @@ next_position(_, {_X, _Y}) ->
   invalid_direction;
 next_position(_Direction, _) ->
   invalid_position.
-
--spec random_position(Map :: game_map()) -> position().
-random_position(#map{width = Width, height = Height}) ->
-  {random:uniform(Width) - 1, random:uniform(Height) - 1}.
 
 -spec dump(Encoding :: orddict:orddict(), Default :: string(), Map :: game_map()) -> list().
 dump(Encoding, Default, #map{surface = Surface}) ->
