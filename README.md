@@ -27,7 +27,7 @@ Create game on 's1' instance:
 Create player on 's2' instance and join the game:
 ```erlang
 {ok, John} = player:create("John").
-player:join(John, {'s1@host', game_name}).
+player:join(John, {'s1@Vladimirs-MacBook-Pro', game_name}).
 %% play
 ```
 

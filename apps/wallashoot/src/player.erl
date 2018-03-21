@@ -286,7 +286,7 @@ print_log(Name, Message) ->
   io:format("~s: ~s~n", [Name, Message]).
 
 print_map(Map) ->
-  lists:foreach(fun(Row) -> io:format("~s~n", [Row]) end, Map).
+  lists:foreach(fun(Row) -> io:format("~s~n", [lists:join(" ", Row)]) end, Map).
 
 print_stats(Stats) ->
   stats:print(fun io:format/2, Stats).

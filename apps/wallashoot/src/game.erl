@@ -14,19 +14,18 @@
 -export([
   start/1,
   join/2,
-  leave/1,
-  move/2,
-  shoot/2,
-  position/1,
-  map/1,
-  stats/1
+  leave/0,
+  move/1,
+  shoot/1,
+  position/0,
+  map/0,
+  stats/0
 ]).
 
 %% Callbacks
 -export([
   init/1,
   handle_call/3,
-  handle_cast/2,
   handle_info/2,
   terminate/2,
   code_change/3
@@ -34,16 +33,15 @@
 
 -record(player, {
   pid       :: pid(),
-  nickname  :: string(),
   monitor   :: reference(),
-  position  :: position()
+  nickname  :: string()
 }).
 
 -record(state, {
   name          :: string(),
   max_players   :: non_neg_integer(),
   map           :: term(),
-  players       :: term(),
+  players       :: map(),
   players_stats :: term()
 }).
 
@@ -63,81 +61,156 @@ start(Options = {Name, _Width, _Height, _MaxPlayers}) ->
   gen_server:start({local, Name}, ?MODULE, Options, []).
 
 -spec join(GameRef :: server_ref(), Nickname :: string()) -> {ok, Pid :: pid()} | error().
-join(GameRef, Nickname) ->
-  gen_server:call(GameRef, {join, Nickname}).
+join(GameRef = {Node, _Name}, PlayerName) ->
+  case net_kernel:connect_node(Node) of
+    true ->
+      case (catch gen_server:call(GameRef, {join, PlayerName})) of
+        {ok, _Pid} ->
+          put(game_ref, GameRef),
+          ok;
+        {'EXIT', {noproc, _}} ->
+          {error, invalid_game};
+        Error ->
+          Error
+      end;
+    _ ->
+      {error, connection_error}
+  end.
 
--spec leave(GameRef :: server_ref()) -> ok | error().
-leave(GameRef) ->
-  gen_server:call(GameRef, leave).
+-spec leave() -> ok | error().
+leave() ->
+  gen_server:call(get(game_ref), leave).
 
--spec move(GameRef :: server_ref(), Direction :: direction()) -> {ok, Position :: position()} | error().
-move(GameRef, Direction) ->
-  gen_server:call(GameRef, {move, Direction}).
+-spec move(Direction :: direction()) -> {ok, Position :: position()} | error().
+move(Direction) ->
+  gen_server:call(get(game_ref), {move, Direction}).
 
--spec shoot(GameRef :: server_ref(), Direction :: direction()) -> ok | error().
-shoot(GameRef, Direction) ->
-  gen_server:call(GameRef, {shoot, Direction}).
+-spec shoot(Direction :: direction()) -> ok | error().
+shoot(Direction) ->
+  gen_server:call(get(game_ref), {shoot, Direction}).
 
--spec position(GameRef :: server_ref()) -> {ok, {position, Position :: position()}} | error().
-position(GameRef) ->
-  gen_server:call(GameRef, position).
+-spec position() -> {ok, {Position :: position()}} | error().
+position() ->
+  gen_server:call(get(game_ref), position).
 
--spec map(GameRef :: server_ref()) -> {ok, {map, Map :: any()}} | error().
-map(GameRef) ->
-  gen_server:call(GameRef, map).
+-spec map() -> {ok, {Map :: any()}} | error().
+map() ->
+  gen_server:call(get(game_ref), map).
 
--spec stats(GameRef :: server_ref()) -> {ok, {stats, Stats :: any()}} | error().
-stats(GameRef) ->
-  gen_server:call(GameRef, stats).
+-spec stats() -> {ok, {Stats :: any()}} | error().
+stats() ->
+  gen_server:call(get(game_ref), stats).
 
 %% ---------------------------------------------------------------
 %% Callbacks
 %% ---------------------------------------------------------------
 
 init(Options = {Name, Width, Height, MaxPlayers}) ->
-  random:seed(erlang:now()),
   State = #state{
     name = Name,
     max_players = MaxPlayers,
-    players = new_players(),
+    players = #{},
     map = map:new(Width, Height),
     players_stats = new_players_stats()
   },
+
   log(system, io_lib:format("Started: ~p", [Options]), State),
   {ok, State}.
 
 handle_call({join, Nickname}, {Pid, _}, State) ->
-  handle_join(Pid, Nickname, State);
+  try
+    check_new_player(Pid, State),
+    check_players_limit(State),
+
+    NewState = register_player({Pid, Nickname}, State),
+    NewState2 = initialize_player_stats({Pid, Nickname}, NewState),
+
+    log(game, [Pid], io_lib:format("~s joined the game", [Nickname]), NewState2),
+    {reply, {ok, self()}, NewState2}
+  catch
+    error:{precondition_failed, Error} -> {reply, {error, Error}, State}
+  end;
 
 handle_call(leave, {Pid, _}, State) ->
-  handle_leave(Pid, State);
+  try
+    check_player(Pid, State),
 
-handle_call({move, Direction}, {Pid, _}, State) ->
-  handle_move(Pid, Direction, State);
+    Player = find_player(Pid, State),
+    NewState = unregister_player(Player, State),
 
-handle_call({shoot, Direction}, {Pid, _}, State) ->
-  handle_shoot(Pid, Direction, State);
+    log(game, [Pid], io_lib:format("~s left the game", [Player#player.nickname]), NewState),
+    {reply, ok, NewState}
+  catch
+    error:{precondition_failed, Error} -> {reply, {error, Error}, State}
+  end;
 
-handle_call(position, {Pid, _}, State) ->
-  handle_position(Pid, State);
+handle_call({move, Direction}, {Pid, _}, State = #state{map = Map}) ->
+  try
+    check_player(Pid, State),
+    check_direction(Direction),
 
-handle_call(map, {Pid, _}, State) ->
-  handle_map(Pid, State);
+    CurrentPosition = map:get_object_position(Pid, Map),
+    NextPosition = next_position(Direction, CurrentPosition),
+    NewState = State#state{map = map:set_object_position(NextPosition, Pid, Map)},
 
-handle_call(stats, {Pid, _}, State) ->
-  handle_stats(Pid, State);
+    Player = find_player(Pid, NewState),
+    log(game, [Pid], io_lib:format("~s moved to ~p", [Player#player.nickname, NextPosition]), NewState),
 
-handle_call(_Message, {_Pid, _}, State) ->
-  {reply, ok, State}.
+    {reply, {ok, NextPosition}, NewState}
+  catch
+    error:{precondition_failed, Error} -> {reply, {error, Error}, State};
+    error:position_out_of_bounds -> {reply, {error, position_out_of_bounds}, State}
+  end;
 
-handle_cast(_Message, State) ->
-  {noreply, State}.
+handle_call({shoot, Direction}, {Pid, _}, State = #state{map = Map}) ->
+  try
+    check_player(Pid, State),
+    check_direction(Direction),
+
+    Player = find_player(Pid, State),
+    log(game, io_lib:format("~s shooted ~s", [Player#player.nickname, Direction]), State),
+
+    Position = map:get_object_position(Pid),
+    case get_object_at_trajectory(Position, Direction, Map) of
+      undefined ->
+        log(game, io_lib:format("~s missed", [Player#player.nickname]), State),
+        {reply, ok, State};
+      OtherPid when is_pid(OtherPid) ->
+        OtherPlayer = find_player(OtherPid, State),
+
+        NewState1 = unregister_player(OtherPlayer, State),
+        send_message(system, OtherPid, killed),
+
+        NewState2 = log_killing_stats(OtherPlayer, Player, NewState1),
+        log(game, [OtherPid], io_lib:format("~s killed ~s", [Player#player.nickname, OtherPlayer#player.nickname]), NewState2),
+
+        {reply, ok, NewState2}
+    end
+  catch
+    error:{precondition_failed, Error} -> {reply, {error, Error}, State}
+  end;
+
+handle_call(position, {Pid, _}, State = #state{map = Map}) ->
+  try
+    check_player(Pid, State),
+
+    {reply, {ok, map:get_object_position(Pid, Map)}, State}
+  catch
+    error:{precondition_failed, Error} -> {reply, {error, Error}, State}
+  end;
+
+handle_call(map, {Pid, _}, State = #state{map = Map}) ->
+  {reply, {ok, {map, map_to_array(Pid, Map)}}, State};
+
+handle_call(stats, {_Pid, _}, State) ->
+  {reply, {ok, {stats, raw_players_stats(State)}}, State}.
 
 handle_info({'DOWN', _Monitor, process, Pid, _Reason}, State) ->
-  handle_process_down(Pid, State);
+  Player = find_player(Pid, State),
+  log(game, [Pid], io_lib:format("~s disconnected", [Player#player.nickname]), State),
 
-handle_info(_Message, State) ->
-  {noreply, State}.
+  NewState = unregister_player(Player, State),
+  {noreply, NewState}.
 
 terminate(_Reason, _State) ->
   ok.
@@ -145,255 +218,138 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-%% ---------------------------------------------------------------
-%% Handlers Implementation
-%% ---------------------------------------------------------------
-
-handle_join(Pid, Nickname, State) ->
-  case is_players_limit_reached(State) of
-    true ->
-      {reply, {error, players_limit_reached}, State};
-    false ->
-      handle_join(#player{pid = Pid, nickname = Nickname}, State)
-  end.
-
-handle_join(Player = #player{pid = Pid, nickname = Nickname}, State) ->
-  NewState = link_player(Player, State),
-  log(game, [Pid], io_lib:format("~s joined game", [Nickname]), NewState),
-  {reply, {ok, self()}, NewState}.
-
-handle_leave(Pid, State) when is_pid(Pid) ->
-  case find_player(Pid, State) of
-    false ->
-      {reply, {error, player_not_found}, State};
-    Player = #player{} ->
-      handle_leave(Player, State)
-  end;
-
-handle_leave(Player = #player{pid = Pid, nickname = Nickname}, State) ->
-  log(game, [Pid], io_lib:format("~s left game", [Nickname]), State),
-  NewState = unlink_player(Player, State),
-  handle_game_over_or_continue({reply, ok, NewState}, {stop, normal, ok, State}, NewState).
-
-handle_move(Pid, Direction, State) when is_pid(Pid) ->
-  case {find_player(Pid, State), map:validate_direction(Direction)} of
-    {Player = #player{}, valid} ->
-      handle_move(Player, Direction, State);
-    {false, _} ->
-      {reply, {error, player_not_found}, State};
-    {_, {invalid, Reason}} ->
-      {reply, {error, Reason}, State}
-  end;
-
-handle_move(Player = #player{pid = Pid, nickname = Nickname, position = Position}, Direction, State) ->
-  NextPosition = map:next_position(Direction, Position),
-  case set_player_position(NextPosition, Player, State) of
-    NewState = #state{} ->
-      log(game, [Pid], io_lib:format("~s moved to ~p", [Nickname, NextPosition]), State),
-      {reply, {ok, NextPosition}, NewState};
-    Error ->
-      {reply, {error, Error}, State}
-  end.
-
-handle_shoot(Pid, Direction, State) when is_pid(Pid) ->
-  case {find_player(Pid, State), map:validate_direction(Direction)} of
-    {Player = #player{}, valid} ->
-      handle_shoot(Player, Direction, State);
-    {false, _} ->
-      {reply, {error, player_not_found}, State};
-    {_, {invalid, Reason}} ->
-      {reply, {error, Reason}, State}
-  end;
-
-handle_shoot(Player = #player{nickname = Nickname, position = Position}, Direction, State = #state{map = Map}) ->
-  log(game, io_lib:format("~s shooted ~s", [Nickname, Direction]), State),
-  case get_shoot_victim(Position, Direction, Map) of
-    false ->
-      handle_miss(Player, State);
-    VictimPid ->
-      handle_kill(VictimPid, Player, State)
-  end.
-
-handle_miss(#player{nickname = Nickname}, State) ->
-  log(game, io_lib:format("~s missed", [Nickname]), State),
-  {reply, ok, State}.
-
-handle_kill(VictimPid, Killer = #player{nickname = KillerNickname}, State) ->
-  Victim = #player{nickname = VictimNickname} = find_player(VictimPid, State),
-
-  log(game, [VictimPid], io_lib:format("~s killed ~s", [KillerNickname, VictimNickname]), State),
-  send_message(system, VictimPid, killed),
-
-  NewState1 = log_killing_stats(Victim, Killer, State),
-  NewState2 = unlink_player(Victim, NewState1),
-  handle_game_over_or_continue({reply, ok, NewState2}, {stop, normal, ok, State}, NewState2).
-
-handle_position(Pid, State) ->
-  case find_player(Pid, State) of
-    false ->
-      {reply, {error, player_not_found}, State};
-    #player{position = Position} ->
-      {reply, {ok, {position, Position}}, State}
-  end.
-
-handle_map(Pid, State) when is_pid(Pid) ->
-  case find_player(Pid, State) of
-    false ->
-      {reply, {error, player_not_found}, State};
-    Player ->
-      handle_map(Player, State)
-  end;
-
-handle_map(#player{pid = Pid}, State = #state{map = Map}) ->
-  Encoding = orddict:new(),
-  Encoding1 = orddict:store(Pid, "U", Encoding),
-  Encoding2 = orddict:store(free, ".", Encoding1),
-  {reply, {ok, {map, map:dump(Encoding2, "E", Map)}}, State}.
-
-handle_stats(Pid, State) when is_pid(Pid) ->
-  case find_player(Pid, State) of
-    false ->
-      {reply, {error, player_not_found}, State};
-    _Player ->
-      handle_stats(State)
-  end.
-
-handle_stats(State) ->
-  {reply, {ok, {stats, raw_players_stats(State)}}, State}.
-
-handle_process_down(Pid, State) ->
-  case find_player(Pid, State) of
-    false ->
-      log(system, io_lib:format("Unknown process down: ~p", [Pid]), State),
-      {noreply, State};
-    Player = #player{nickname = Nickname} ->
-      log(game, [Pid], io_lib:format("~s disconnected", [Nickname]), State),
-      NewState = unlink_player(Player, State),
-      handle_game_over_or_continue({noreply, NewState}, {stop, normal, State}, NewState)
-  end.
-
-handle_game_over_or_continue(ContinueResult, StopResult, State) ->
-  case is_game_over(State) of
-    false ->
-      ContinueResult;
-    true ->
-      handle_game_over(StopResult, State)
-  end.
-
-handle_game_over(StopResult, State) ->
-  case players_list(State) of
-    [] ->
-      log(system, "Last player left game. Nobody won.", State);
-    [#player{pid = WinnerPid, nickname = Nickname} | _] ->
-      log(system, io_lib:format("~s won game!!!", [Nickname]), State),
-      send_message(system, WinnerPid, win)
-  end,
-  print_players_stats(State),
-  log(system, "Game over.", State),
-  StopResult.
 
 %% ---------------------------------------------------------------
 %% Private Functions
 %% ---------------------------------------------------------------
 
-link_player(Player = #player{pid = Pid}, State) ->
+check_direction(left) -> ok;
+check_direction(right) -> ok;
+check_direction(up) -> ok;
+check_direction(down) -> ok;
+check_direction(left_up) -> ok;
+check_direction(right_up) -> ok;
+check_direction(left_down) -> ok;
+check_direction(right_down) -> ok;
+check_direction(right_down) -> erlang:error({precondition_failed, invalid_direction}).
+
+next_position(left, {X, Y}) ->
+  {X - 1, Y};
+next_position(right, {X, Y}) ->
+  {X + 1, Y};
+next_position(up, {X, Y}) ->
+  {X, Y - 1};
+next_position(down, {X, Y}) ->
+  {X, Y + 1};
+next_position(up_left, {X, Y}) ->
+  {X - 1, Y - 1};
+next_position(down_left, {X, Y}) ->
+  {X - 1, Y + 1};
+next_position(up_right, {X, Y}) ->
+  {X + 1, Y - 1};
+next_position(down_right, {X, Y}) ->
+  {X + 1, Y + 1};
+next_position(_, {_X, _Y}) ->
+  invalid_direction.
+
+random_free_position(Map) ->
+  Position = random_map_position(Map),
+  case map:get_object_at(Position, Map, undefined) of
+    undefined ->
+      Position;
+    _ ->
+      random_free_position(Map)
+  end.
+
+random_map_position(Map) ->
+  Width = map:width(Map),
+  Height = map:height(Map),
+  {rand:uniform(Width), rand:uniform(Height)}.
+
+get_object_at_trajectory(Position, Direction, Map) ->
+  try
+    NextPosition = next_position(Direction, Position),
+    case map:get_object_at(NextPosition, Map, undefined) of
+      undefined ->
+        get_object_at_trajectory(NextPosition, Direction, Map);
+      Object ->
+        Object
+    end
+  catch
+    error:out_of_bounds -> undefined
+  end.
+
+map_to_array(PlayerPid, Map) ->
+  PositionToSymbol = fun(Position) ->
+    case map:get_object_at(Position, Map, undefined) of
+      undefined -> ".";
+      PlayerPid -> "P";
+      OtherPid when is_pid(OtherPid) -> "E"
+    end
+  end,
+
+  lists:map(fun(Y) ->
+    [PositionToSymbol({X, Y}) || X <- lists:seq(1, map:width(Map))]
+  end, lists:seq(1, map:height(Map))).
+
+
+
+check_players_limit(State = #state{max_players = MaxPlayers}) ->
+  case players_count(State) >= MaxPlayers of
+    true -> erlang:error({precondition_failed, players_limit_reached});
+    false -> ok
+  end.
+
+check_new_player(Pid, State) ->
+  case find_player(Pid, State) of
+    undefined -> ok;
+    _ -> erlang:error({precondition_failed, already_playing})
+  end.
+
+check_player(Pid, State) ->
+  case find_player(Pid, State) of
+    false -> erlang:error({precondition_failed, not_playing});
+    _ -> ok
+  end.
+
+register_player({Pid, Nickname}, State = #state{map = Map, players = Players}) ->
   Monitor = erlang:monitor(process, Pid),
-  Position = random_free_position(State),
 
-  NewPlayer = Player#player{position = Position, monitor = Monitor},
-  NewState1 = put_player(NewPlayer, State),
-  NewState2 = set_player_position(Position, NewPlayer, NewState1),
-  initialize_player_stats(Player, NewState2).
+  Player = #player{pid = Pid, nickname = Nickname, monitor = Monitor},
+  NewPlayers = Players#{Pid => Player},
 
-unlink_player(Player = #player{position = Position, monitor = Monitor}, State = #state{map = Map}) ->
+  Position = random_free_position(Map),
+  NewMap = map:set_object_position(Position, Pid, Map),
+
+  State#state{map = NewMap, players = NewPlayers}.
+
+unregister_player(#player{pid = Pid, monitor = Monitor}, State = #state{map = Map, players = Players}) ->
   erlang:demonitor(Monitor),
-  NewState = delete_player(Player, State),
-  NewState#state{map = map:set(Position, free, Map)}.
 
-initialize_player_stats(#player{pid = Pid, nickname = Nickname}, State) ->
+  NewMap = map:delete_object(Pid, Map),
+  NewPlayers = maps:remove(Pid, Players),
+
+  State#state{map = NewMap, players = NewPlayers}.
+
+find_player(Pid, #state{players = Players}) ->
+  maps:get(Pid, Players, undefined).
+
+players_count(#state{players = Players}) ->
+  maps:size(Players).
+
+
+
+
+new_players_stats() ->
+  [].
+
+initialize_player_stats({Pid, Nickname}, State) ->
   case find_player_stat(Pid, State) of
     false ->
       put_player_stat(#player_stat{pid = Pid, nickname = Nickname, frags = 0, deaths = 0}, State);
     _Found ->
       State
   end.
-
-set_player_position(NewPosition, Player = #player{pid = Pid, position = OldPosition}, State = #state{map = Map}) ->
-  case {map:validate_position(NewPosition, Map), map:get(NewPosition, Map)} of
-    {valid, free} ->
-      NewState = put_player(Player#player{position = NewPosition}, State),
-      Map1 = map:set(OldPosition, free, Map),
-      NewState#state{map = map:set(NewPosition, Pid, Map1)};
-    {{invalid, Reason}, _} ->
-      Reason;
-    {valid, OtherPid} when is_pid(OtherPid) ->
-      position_accuired
-  end.
-
-get_shoot_victim(Position, Direction, Map) ->
-  NextPosition = map:next_position(Direction, Position),
-  case {map:validate_position(NextPosition, Map), map:get(NextPosition, Map)} of
-    {valid, free} ->
-      get_shoot_victim(NextPosition, Direction, Map);
-    {{invalid, position_out_of_range}, _} ->
-      false;
-    {valid, OtherPid} when is_pid(OtherPid) ->
-      OtherPid
-  end.
-
-log_killing_stats(#player{pid = VictimPid}, #player{pid = KillerPid}, State) ->
-  VictimStat = #player_stat{deaths = VictimDeaths} = find_player_stat(VictimPid, State),
-  NewState = put_player_stat(VictimStat#player_stat{deaths = VictimDeaths + 1}, State),
-
-  KillerStat = #player_stat{frags = KillerFrags} = find_player_stat(KillerPid, State),
-  put_player_stat(KillerStat#player_stat{frags = KillerFrags + 1}, NewState).
-
-is_game_over(State) ->
-  players_count(State) =< 1.
-
-random_free_position(State = #state{map = Map}) ->
-  Position = random_map_position(Map),
-  case map:get(Position, Map) of
-    free ->
-      Position;
-    _ ->
-      random_free_position(State)
-  end.
-
-random_map_position(Map) ->
-  Width = map:width(Map),
-  Height = map:height(Map),
-  {random:uniform(Width) - 1, random:uniform(Height) - 1}.
-
-
-
-new_players() ->
-  [].
-
-put_player(Player = #player{pid = Pid}, State = #state{players = Players}) ->
-  NewPlayers = lists:keystore(Pid, 2, Players, Player),
-  State#state{players = NewPlayers}.
-
-delete_player(#player{pid = Pid}, State = #state{players = Players}) ->
-  NewPlayers = lists:keydelete(Pid, 2, Players),
-  State#state{players = NewPlayers}.
-
-find_player(Pid, #state{players = Players}) ->
-  lists:keyfind(Pid, 2, Players).
-
-players_count(#state{players = Players}) ->
-  length(Players).
-
-players_list(#state{players = Players}) ->
-  Players.
-
-is_players_limit_reached(State = #state{max_players = MaxPlayers}) ->
-  players_count(State) >= MaxPlayers.
-
-
-
-new_players_stats() ->
-  [].
 
 put_player_stat(Entry = #player_stat{pid = Pid}, State = #state{players_stats = PlayersStats}) ->
   NewStats = lists:keystore(Pid, 2, PlayersStats, Entry),
@@ -402,21 +358,20 @@ put_player_stat(Entry = #player_stat{pid = Pid}, State = #state{players_stats = 
 find_player_stat(Pid, #state{players_stats = PlayersStats}) ->
   lists:keyfind(Pid, 2, PlayersStats).
 
+log_killing_stats(#player{pid = VictimPid}, #player{pid = KillerPid}, State) ->
+  VictimStat = #player_stat{deaths = VictimDeaths} = find_player_stat(VictimPid, State),
+  NewState = put_player_stat(VictimStat#player_stat{deaths = VictimDeaths + 1}, State),
 
+  KillerStat = #player_stat{frags = KillerFrags} = find_player_stat(KillerPid, State),
+  put_player_stat(KillerStat#player_stat{frags = KillerFrags + 1}, NewState).
 
 raw_players_stats(#state{players_stats = PlayersStats}) ->
   lists:map(fun(#player_stat{nickname = Nickname, frags = Frags, deaths = Deaths}) ->
     {Nickname, Frags, Deaths}
   end, PlayersStats).
 
-print_players_stats(State) ->
-  F = fun(Format, Args) -> log(system, io_lib:format(Format, Args), State) end,
-  log(system, "", State),
-  log(system, "Statistics", State),
-  log(system, "------------------------------------------", State),
-  stats:print(F, raw_players_stats(State)),
-  log(system, "------------------------------------------", State),
-  log(system, "", State).
+
+
 
 
 log(system, Message, #state{name = Name}) ->
@@ -425,10 +380,11 @@ log(system, Message, #state{name = Name}) ->
 log(game, Message, State) ->
   log(game, [], Message, State).
 
-log(game, Excludes, Message, State) ->
+log(game, Excludes, Message, State = #state{players = Players}) ->
   log(system, Message, State),
 
-  AllPids = lists:map(fun(#player{pid = Pid}) -> Pid end, players_list(State)),
+  AllPlayers = maps:values(Players),
+  AllPids = lists:map(fun(#player{pid = Pid}) -> Pid end, AllPlayers),
   FilteredPids = lists:filter(fun(Pid) ->
     not lists:member(Pid, Excludes)
   end, AllPids),
