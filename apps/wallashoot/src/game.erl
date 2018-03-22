@@ -61,12 +61,12 @@ start(Options = {Name, _Width, _Height, _MaxPlayers}) ->
   gen_server:start({local, Name}, ?MODULE, Options, []).
 
 -spec join(GameRef :: server_ref(), Nickname :: string()) -> {ok, Pid :: pid()} | error().
-join(GameRef = {Node, _Name}, PlayerName) ->
+join(GameRef = {_Name, Node}, PlayerName) ->
   case net_kernel:connect_node(Node) of
     true ->
-      case (catch gen_server:call(GameRef, {join, PlayerName})) of
+        case (catch gen_server:call(GameRef, {join, PlayerName})) of
         {ok, _Pid} ->
-          put(game_ref, GameRef),
+          set_current_current_game_ref(GameRef),
           ok;
         {'EXIT', {noproc, _}} ->
           {error, invalid_game};
@@ -79,27 +79,38 @@ join(GameRef = {Node, _Name}, PlayerName) ->
 
 -spec leave() -> ok | error().
 leave() ->
-  gen_server:call(get(game_ref), leave).
+  gen_server:call(current_game_ref(), leave).
 
 -spec move(Direction :: direction()) -> {ok, Position :: position()} | error().
 move(Direction) ->
-  gen_server:call(get(game_ref), {move, Direction}).
+  gen_server:call(current_game_ref(), {move, Direction}).
 
 -spec shoot(Direction :: direction()) -> ok | error().
 shoot(Direction) ->
-  gen_server:call(get(game_ref), {shoot, Direction}).
+  gen_server:call(current_game_ref(), {shoot, Direction}).
 
 -spec position() -> {ok, {Position :: position()}} | error().
 position() ->
-  gen_server:call(get(game_ref), position).
+  gen_server:call(current_game_ref(), position).
 
 -spec map() -> {ok, {Map :: any()}} | error().
 map() ->
-  gen_server:call(get(game_ref), map).
+  case gen_server:call(current_game_ref(), map) of
+    {ok, Map} -> print_map(Map);
+    Error -> Error
+  end.
 
 -spec stats() -> {ok, {Stats :: any()}} | error().
 stats() ->
-  gen_server:call(get(game_ref), stats).
+  gen_server:call(current_game_ref(), stats).
+
+%% Private
+set_current_current_game_ref(GameRef) ->
+  put(current_game_ref, GameRef).
+
+%% Private
+current_game_ref() ->
+  get(current_game_ref).
 
 %% ---------------------------------------------------------------
 %% Callbacks
@@ -200,10 +211,10 @@ handle_call(position, {Pid, _}, State = #state{map = Map}) ->
   end;
 
 handle_call(map, {Pid, _}, State = #state{map = Map}) ->
-  {reply, {ok, {map, map_to_array(Pid, Map)}}, State};
+  {reply, {ok, map_to_array(Pid, Map)}, State};
 
 handle_call(stats, {_Pid, _}, State) ->
-  {reply, {ok, {stats, raw_players_stats(State)}}, State}.
+  {reply, {ok, raw_players_stats(State)}, State}.
 
 handle_info({'DOWN', _Monitor, process, Pid, _Reason}, State) ->
   Player = find_player(Pid, State),
@@ -292,6 +303,9 @@ map_to_array(PlayerPid, Map) ->
     [PositionToSymbol({X, Y}) || X <- lists:seq(1, map:width(Map))]
   end, lists:seq(1, map:height(Map))).
 
+print_map(Map) ->
+  lists:foreach(fun(Row) -> io:format("~s~n", [lists:join(" ", Row)]) end, Map).
+
 
 
 check_players_limit(State = #state{max_players = MaxPlayers}) ->
@@ -369,6 +383,9 @@ raw_players_stats(#state{players_stats = PlayersStats}) ->
   lists:map(fun(#player_stat{nickname = Nickname, frags = Frags, deaths = Deaths}) ->
     {Nickname, Frags, Deaths}
   end, PlayersStats).
+
+print_stats(Stats) ->
+  stats:print(fun io:format/2, Stats).
 
 
 
