@@ -12,8 +12,7 @@
 
 %% API
 -export([
-  create/1,
-  destroy/1,
+  create_game/1,
   join/2,
   leave/1,
   move/2,
@@ -51,16 +50,27 @@
 %% API functions
 %% ---------------------------------------------------------------
 
--spec create(Nickname :: string()) -> {ok, Pid :: pid()} | error().
-create(Nickname) ->
-  gen_server:start(?MODULE, Nickname, []).
-
--spec destroy(PlayerRef :: server_ref()) -> ok | error().
-destroy(PlayerRef) ->
-  gen_server:call(PlayerRef, destroy).
+-spec create_game(GameName :: string()) -> {ok, Pid :: pid()} | error().
+create_game(GameName) ->
+  game:start({GameName, 10, 10, 5}).
 
 -spec join(PlayerRef :: server_ref(), Game :: {Node :: atom(), Name :: atom()}) -> ok | error().
-join(PlayerRef, Options = {_Node, _Name}) ->
+join(GameRef = {_Name, Node}, PlayerName) ->
+  case net_kernel:connect_node(Node) of
+    true ->
+      case (catch gen_server:call(GameRef, {join, PlayerName})) of
+        {ok, _Pid} ->
+          set_current_current_game(GameRef),
+          player_cli:start_link(PlayerName),
+          ok;
+        {'EXIT', {noproc, _}} ->
+          {error, invalid_game_name};
+        Error ->
+          Error
+      end;
+    _ ->
+      {error, connection_error}
+  end.
   gen_server:call(PlayerRef, {join, Options}).
 
 -spec leave(PlayerRef :: server_ref()) -> ok | error().

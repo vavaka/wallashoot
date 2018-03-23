@@ -66,10 +66,11 @@ join(GameRef = {_Name, Node}, PlayerName) ->
     true ->
         case (catch gen_server:call(GameRef, {join, PlayerName})) of
         {ok, _Pid} ->
-          set_current_current_game_ref(GameRef),
+          set_current_current_game(GameRef),
+          player_cli:start_link(PlayerName),
           ok;
         {'EXIT', {noproc, _}} ->
-          {error, invalid_game};
+          {error, invalid_game_name};
         Error ->
           Error
       end;
@@ -79,38 +80,38 @@ join(GameRef = {_Name, Node}, PlayerName) ->
 
 -spec leave() -> ok | error().
 leave() ->
-  gen_server:call(current_game_ref(), leave).
+  gen_server:call(current_game(), leave).
 
 -spec move(Direction :: direction()) -> {ok, Position :: position()} | error().
 move(Direction) ->
-  gen_server:call(current_game_ref(), {move, Direction}).
+  gen_server:call(current_game(), {move, Direction}).
 
 -spec shoot(Direction :: direction()) -> ok | error().
 shoot(Direction) ->
-  gen_server:call(current_game_ref(), {shoot, Direction}).
+  gen_server:call(current_game(), {shoot, Direction}).
 
 -spec position() -> {ok, {Position :: position()}} | error().
 position() ->
-  gen_server:call(current_game_ref(), position).
+  gen_server:call(current_game(), position).
 
 -spec map() -> {ok, {Map :: any()}} | error().
 map() ->
-  case gen_server:call(current_game_ref(), map) of
+  case gen_server:call(current_game(), map) of
     {ok, Map} -> print_map(Map);
     Error -> Error
   end.
 
 -spec stats() -> {ok, {Stats :: any()}} | error().
 stats() ->
-  gen_server:call(current_game_ref(), stats).
+  gen_server:call(current_game(), stats).
 
 %% Private
-set_current_current_game_ref(GameRef) ->
-  put(current_game_ref, GameRef).
+set_current_current_game(GameRef) ->
+  put(current_game, GameRef).
 
 %% Private
-current_game_ref() ->
-  get(current_game_ref).
+current_game() ->
+  get(current_game).
 
 %% ---------------------------------------------------------------
 %% Callbacks
