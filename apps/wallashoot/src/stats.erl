@@ -17,7 +17,7 @@ print(PrintFunction, Stats) ->
     Frags1 >= Frags2
   end, Stats),
 
-  PrintFunction("~10s  ~10s  ~10s~n", ["Nickname", "Kills", "Deaths"]),
+  PrintFunction("~10s  ~10s  ~10s~n", ["Nickname", "Frags", "Deaths"]),
   lists:foreach(fun({Nickname, Frags, Deaths}) ->
     PrintFunction("~10s  ~10B  ~10B~n", [Nickname, Frags, Deaths])
   end, SortedStats).

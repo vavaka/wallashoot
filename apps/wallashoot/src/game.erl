@@ -14,18 +14,19 @@
 -export([
   start/1,
   join/2,
-  leave/0,
-  move/1,
-  shoot/1,
-  position/0,
-  map/0,
-  stats/0
+  leave/1,
+  move/2,
+  shoot/2,
+  position/1,
+  map/1,
+  stats/1
 ]).
 
 %% Callbacks
 -export([
   init/1,
   handle_call/3,
+  handle_cast/2,
   handle_info/2,
   terminate/2,
   code_change/3
@@ -56,68 +57,55 @@
 %% API functions
 %% ---------------------------------------------------------------
 
--spec start(Options :: {Name :: atom(), Width :: non_neg_integer(), Height :: non_neg_integer(), MaxPlayers :: non_neg_integer()}) -> {ok, Pid :: pid()} | error().
-start(Options = {Name, _Width, _Height, _MaxPlayers}) ->
-  gen_server:start({local, Name}, ?MODULE, Options, []).
+-spec start(GameOptions :: game_options()) -> {ok, pid()} | error().
+start(GameOptions = {Name, _Width, _Height, _MaxPlayers}) ->
+  gen_server:start({local, Name}, ?MODULE, GameOptions, []).
 
--spec join(GameRef :: server_ref(), Nickname :: string()) -> {ok, Pid :: pid()} | error().
+-spec join(GameRef :: server_ref(), PlayerName :: string()) -> {ok, pid()} | error().
 join(GameRef = {_Name, Node}, PlayerName) ->
   case net_kernel:connect_node(Node) of
     true ->
-        case (catch gen_server:call(GameRef, {join, PlayerName})) of
-        {ok, _Pid} ->
-          set_current_current_game(GameRef),
-          player_cli:start_link(PlayerName),
-          ok;
+      case (catch gen_server:call(GameRef, {join, PlayerName})) of
+        {ok, Pid} ->
+          {ok, Pid};
         {'EXIT', {noproc, _}} ->
           {error, invalid_game_name};
         Error ->
-          Error
+          {error, Error}
       end;
     _ ->
       {error, connection_error}
   end.
 
--spec leave() -> ok | error().
-leave() ->
-  gen_server:call(current_game(), leave).
+-spec leave(GameRef :: server_ref()) -> ok | error().
+leave(GameRef) ->
+  gen_server:call(GameRef, leave).
 
--spec move(Direction :: direction()) -> {ok, Position :: position()} | error().
-move(Direction) ->
-  gen_server:call(current_game(), {move, Direction}).
+-spec move(GameRef :: server_ref(), Direction :: direction()) -> {ok, position()} | error().
+move(GameRef, Direction) ->
+  gen_server:call(GameRef, {move, Direction}).
 
--spec shoot(Direction :: direction()) -> ok | error().
-shoot(Direction) ->
-  gen_server:call(current_game(), {shoot, Direction}).
+-spec shoot(GameRef :: server_ref(), Direction :: direction()) -> ok | error().
+shoot(GameRef, Direction) ->
+  gen_server:call(GameRef, {shoot, Direction}).
 
--spec position() -> {ok, {Position :: position()}} | error().
-position() ->
-  gen_server:call(current_game(), position).
+-spec position(GameRef :: server_ref()) -> {ok, position()} | error().
+position(GameRef) ->
+  gen_server:call(GameRef, position).
 
--spec map() -> {ok, {Map :: any()}} | error().
-map() ->
-  case gen_server:call(current_game(), map) of
-    {ok, Map} -> print_map(Map);
-    Error -> Error
-  end.
+-spec map(GameRef :: server_ref()) -> {ok, list()} | error().
+map(GameRef) ->
+  gen_server:call(GameRef, map).
 
--spec stats() -> {ok, {Stats :: any()}} | error().
-stats() ->
-  gen_server:call(current_game(), stats).
-
-%% Private
-set_current_current_game(GameRef) ->
-  put(current_game, GameRef).
-
-%% Private
-current_game() ->
-  get(current_game).
+-spec stats(GameRef :: server_ref()) -> {ok, list()} | error().
+stats(GameRef) ->
+  gen_server:call(GameRef, stats).
 
 %% ---------------------------------------------------------------
 %% Callbacks
 %% ---------------------------------------------------------------
 
-init(Options = {Name, Width, Height, MaxPlayers}) ->
+init(GameOptions = {Name, Width, Height, MaxPlayers}) ->
   State = #state{
     name = Name,
     max_players = MaxPlayers,
@@ -126,7 +114,7 @@ init(Options = {Name, Width, Height, MaxPlayers}) ->
     players_stats = new_players_stats()
   },
 
-  log(system, io_lib:format("Started: ~p", [Options]), State),
+  log(system, io_lib:format("New game started: ~p", [GameOptions]), State),
   {ok, State}.
 
 handle_call({join, Nickname}, {Pid, _}, State) ->
@@ -182,7 +170,7 @@ handle_call({shoot, Direction}, {Pid, _}, State = #state{map = Map}) ->
     Player = find_player(Pid, State),
     log(game, io_lib:format("~s shooted ~s", [Player#player.nickname, Direction]), State),
 
-    Position = map:get_object_position(Pid),
+    Position = map:get_object_position(Pid, Map),
     case get_object_at_trajectory(Position, Direction, Map) of
       undefined ->
         log(game, io_lib:format("~s missed", [Player#player.nickname]), State),
@@ -190,11 +178,10 @@ handle_call({shoot, Direction}, {Pid, _}, State = #state{map = Map}) ->
       OtherPid when is_pid(OtherPid) ->
         OtherPlayer = find_player(OtherPid, State),
 
-        NewState1 = unregister_player(OtherPlayer, State),
-        send_message(system, OtherPid, killed),
+        event({kill, Player#player.nickname, OtherPlayer#player.nickname}, State),
+        NewState1 = log_killing_stats(OtherPlayer, Player, State),
 
-        NewState2 = log_killing_stats(OtherPlayer, Player, NewState1),
-        log(game, [OtherPid], io_lib:format("~s killed ~s", [Player#player.nickname, OtherPlayer#player.nickname]), NewState2),
+        NewState2 = unregister_player(OtherPlayer, NewState1),
 
         {reply, ok, NewState2}
     end
@@ -216,6 +203,9 @@ handle_call(map, {Pid, _}, State = #state{map = Map}) ->
 
 handle_call(stats, {_Pid, _}, State) ->
   {reply, {ok, raw_players_stats(State)}, State}.
+
+handle_cast(_Message, State) ->
+  {noreply, State}.
 
 handle_info({'DOWN', _Monitor, process, Pid, _Reason}, State) ->
   Player = find_player(Pid, State),
@@ -243,7 +233,7 @@ check_direction(left_up) -> ok;
 check_direction(right_up) -> ok;
 check_direction(left_down) -> ok;
 check_direction(right_down) -> ok;
-check_direction(right_down) -> erlang:error({precondition_failed, invalid_direction}).
+check_direction(_) -> erlang:error({precondition_failed, invalid_direction}).
 
 next_position(left, {X, Y}) ->
   {X - 1, Y};
@@ -303,9 +293,6 @@ map_to_array(PlayerPid, Map) ->
   lists:map(fun(Y) ->
     [PositionToSymbol({X, Y}) || X <- lists:seq(1, map:width(Map))]
   end, lists:seq(1, map:height(Map))).
-
-print_map(Map) ->
-  lists:foreach(fun(Row) -> io:format("~s~n", [lists:join(" ", Row)]) end, Map).
 
 
 
@@ -385,12 +372,9 @@ raw_players_stats(#state{players_stats = PlayersStats}) ->
     {Nickname, Frags, Deaths}
   end, PlayersStats).
 
-print_stats(Stats) ->
-  stats:print(fun io:format/2, Stats).
 
-
-
-
+game_ref(#state{name = Name}) ->
+  {Name, node()}.
 
 log(system, Message, #state{name = Name}) ->
   lager:info("GAME ~s: ~s~n", [Name, Message]);
@@ -406,12 +390,17 @@ log(game, Excludes, Message, State = #state{players = Players}) ->
   FilteredPids = lists:filter(fun(Pid) ->
     not lists:member(Pid, Excludes)
   end, AllPids),
-  send_message(log, FilteredPids, Message).
+  send_message(FilteredPids, {game_ref(State), log, Message}).
 
-send_message(Type, Pids, Message) when is_list(Pids) ->
+event(Message, State) ->
+  broadcast_message({game_ref(State), event, Message}, State).
+
+broadcast_message(Message, #state{players = Players}) ->
+  AllPlayers = maps:values(Players),
+  AllPids = lists:map(fun(#player{pid = Pid}) -> Pid end, AllPlayers),
   lists:foreach(fun(Pid) ->
-    send_message(Type, Pid, Message)
-  end, Pids);
+    send_message(Pid, Message)
+  end, AllPids).
 
-send_message(Type, Pid, Message) when is_pid(Pid) ->
-  catch Pid ! {?APP_NAME, Type, Message}.
+send_message(Pid, Message) when is_pid(Pid) ->
+  catch Pid ! Message.

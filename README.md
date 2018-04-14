@@ -21,6 +21,13 @@ Start 3 instances of application:
 
 Create game on 's1' instance:
 ```erlang
+player_cli:start().
+player_cli:create_game({game_name, 10, 10, 5}).
+
+player_cli:join_game({game_name, 's1@Vladimirs-MacBook-Pro'}, 'John').
+
+player_cli:leave_game().
+
 {ok, Game} = game:start({game_name, 10, 10, 5}).
 game:join({game_name, 's1@Vladimirs-MacBook-Pro'}, 'John').
 ```

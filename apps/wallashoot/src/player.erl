@@ -60,8 +60,6 @@ join(GameRef = {_Name, Node}, PlayerName) ->
     true ->
       case (catch gen_server:call(GameRef, {join, PlayerName})) of
         {ok, _Pid} ->
-          set_current_current_game(GameRef),
-          player_cli:start_link(PlayerName),
           ok;
         {'EXIT', {noproc, _}} ->
           {error, invalid_game_name};
@@ -71,7 +69,6 @@ join(GameRef = {_Name, Node}, PlayerName) ->
     _ ->
       {error, connection_error}
   end.
-  gen_server:call(PlayerRef, {join, Options}).
 
 -spec leave(PlayerRef :: server_ref()) -> ok | error().
 leave(PlayerRef) ->
